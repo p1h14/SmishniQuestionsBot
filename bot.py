@@ -33,7 +33,7 @@ players = {}
 group_id = None
 questions = []
 answers = defaultdict(list)
-votes = defaultdict(lambda: defaultdict(int))
+votes = defaultdict(dict)  # {question: {user_id: answer_index}}
 scores = defaultdict(int)
 current_question = None
 game_running = False
@@ -43,7 +43,6 @@ def load_questions():
     with open("questions.txt", "r", encoding="utf-8") as f:
         questions = [line.strip() for line in f if line.strip()]
 
-# Команда /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global group_id, players, scores, game_running
     if game_running:
@@ -110,8 +109,11 @@ async def post_answers(context: ContextTypes.DEFAULT_TYPE):
 
     q = current_question
     anon_answers = answers.get(q, [])
-    keyboard = []
+    if not anon_answers:
+        await context.bot.send_message(chat_id=group_id, text="Немає відповідей на це питання.")
+        return
 
+    keyboard = []
     for i, ans in enumerate(anon_answers):
         keyboard.append([InlineKeyboardButton(f"Голос за {i+1}", callback_data=f"vote_{i}")])
 
@@ -124,15 +126,13 @@ async def post_answers(context: ContextTypes.DEFAULT_TYPE):
 async def show_results(context: ContextTypes.DEFAULT_TYPE):
     global scores
 
-    vote_counts = {i: 0 for i in range(len(answers[current_question]))}
-    for voter in votes[current_question]:
-        idx = votes[current_question][voter]
+    vote_counts = defaultdict(int)
+    for voter, idx in votes[current_question].items():
         vote_counts[idx] += 1
 
     msg = "🏆 Результати голосування:\n"
     for i, count in vote_counts.items():
         msg += f"Варіант {i+1}: {count} голос(ів)\n"
-        scores[i] += count
 
     await context.bot.send_message(chat_id=group_id, text=msg)
     await context.bot.send_message(chat_id=group_id, text="Гру завершено. Можна писати /stats або /stopgame.")
