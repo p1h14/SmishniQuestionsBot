@@ -1,192 +1,134 @@
 import os
 import random
+import logging
 import asyncio
 from dotenv import load_dotenv
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.constants import ParseMode
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler,
-    MessageHandler, ContextTypes, filters
+    ApplicationBuilder,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
 )
 
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 
-# Дані гри
-group_id = None
-players = {}
-scores = {}
-questions = []
-used_questions = set()
-current_round_questions = []
-current_answers = {}
-vote_stage = False
-votes = {}
-game_running = False
-start_timer = None
+logging.basicConfig(level=logging.INFO)
 
-# Завантажити питання з файлу
+players = {}
+group_id = None
+questions = []
+answers = {}
+used_questions = set()
+scores = {}
+game_started = False
+game_timer = None
+
+# Завантаження питань
 def load_questions():
     global questions
     with open("questions.txt", "r", encoding="utf-8") as f:
         questions = [line.strip() for line in f if line.strip()]
 
-# Команда /start
+# Старт гри
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global group_id, players, game_running, start_timer
-    if game_running:
-        await update.message.reply_text("⚠️ Гра вже йде!")
+    global group_id, players, scores, game_started, game_timer
+
+    if game_started:
+        await update.message.reply_text("Гра вже запущена.")
         return
 
     players.clear()
     scores.clear()
     group_id = update.effective_chat.id
-    game_running = True
+    game_started = True
 
-    keyboard = [[InlineKeyboardButton("🎮 Приєднатись", callback_data="join")]]
+    keyboard = [[InlineKeyboardButton("🎮 Приєднатися", callback_data="join")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await context.bot.send_message(
         chat_id=group_id,
-        text="🎉 <b>Гра почалась!</b> Натисни, щоб приєднатися!",
-        reply_markup=reply_markup,
-        parse_mode=ParseMode.HTML
+        text="🎉 Гра починається! Натисни, щоб приєднатися.",
+        reply_markup=reply_markup
     )
 
-# Обробка натискання "Приєднатись"
+    # Чекаємо 30 секунд для приєднання гравців
+    await asyncio.sleep(30)
+
+    if len(players) >= 2:
+        await start_round(context)
+    else:
+        await context.bot.send_message(chat_id=group_id, text="Недостатньо гравців 😢")
+        game_started = False
+
+# Приєднання гравця
 async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global start_timer
+    global players
+
     query = update.callback_query
     user = query.from_user
 
     if user.id not in players:
         players[user.id] = user.first_name
-        scores[user.id] = 0
-        await query.answer("🎉 Ти приєднався!")
+        await query.answer("Ти приєднався!")
     else:
-        await query.answer("✅ Ти вже в грі!")
+        await query.answer("Ти вже в грі 😉")
 
     player_list = "\n".join([f"• {name}" for name in players.values()])
-    await query.edit_message_text(f"✅ Гравці:\n{player_list}\n\nОчікуємо ще...")
+    await query.edit_message_text(
+        text=f"✅ Учасники гри:\n{player_list}\n(Старт за 30 сек...)"
+    )
 
-    if len(players) == 2 and not start_timer:
-        start_timer = asyncio.create_task(start_game_in_30_sec(context))
+# Початок раунду
+async def start_round(context: ContextTypes.DEFAULT_TYPE):
+    global used_questions, questions, group_id, answers
 
-# Запуск гри через 30 секунд
-async def start_game_in_30_sec(context):
-    await asyncio.sleep(30)
-    await start_round(context)
+    selected = []
+    answers.clear()
 
-# Запуск раунду
-async def start_round(context):
-    global current_round_questions, current_answers, vote_stage
-    current_answers.clear()
-    vote_stage = False
-    current_round_questions = get_random_questions(5)
+    while len(selected) < 5:
+        q = random.choice(questions)
+        if q not in used_questions:
+            selected.append(q)
+            used_questions.add(q)
+        if len(used_questions) == len(questions):
+            used_questions.clear()
 
-    await context.bot.send_message(chat_id=group_id, text="🚨 Розпочинаємо раунд!")
-    for i, q in enumerate(current_round_questions):
+    for i, q in enumerate(selected):
         await context.bot.send_message(chat_id=group_id, text=f"❓ Питання {i+1}: {q}")
-        for player_id in players:
-            await context.bot.send_message(chat_id=player_id, text=f"✍️ Відповідь на питання:\n{q}")
+        for user_id in players:
+            await context.bot.send_message(chat_id=user_id, text=f"Питання:\n{q}")
         await asyncio.sleep(20)
 
-    await post_answers(context)
+    await context.bot.send_message(chat_id=group_id, text="📝 Завершено! Перегляд відповідей пізніше.")
 
-# Показати відповіді та запустити голосування
-async def post_answers(context):
-    global vote_stage, votes
-    vote_stage = True
-    votes.clear()
-
-    await context.bot.send_message(chat_id=group_id, text="🗳 Голосування почалось!")
-    for q in current_round_questions:
-        q_answers = current_answers.get(q, [])
-        buttons = []
-        for i, ans in enumerate(q_answers):
-            buttons.append([InlineKeyboardButton(ans, callback_data=f"vote_{q}_{i}")])
-        if buttons:
-            await context.bot.send_message(
-                chat_id=group_id,
-                text=f"❓ {q}",
-                reply_markup=InlineKeyboardMarkup(buttons)
-            )
-
-    await asyncio.sleep(30)
-    await end_round(context)
-
-# Завершити раунд
-async def end_round(context):
-    global vote_stage, used_questions
-    vote_stage = False
-    used_questions.update(current_round_questions)
-    await context.bot.send_message(chat_id=group_id, text="🏁 Раунд завершено!")
-
-    score_table = "\n".join([f"{players[p]}: {scores[p]} балів" for p in players])
-    await context.bot.send_message(chat_id=group_id, text=f"📊 Статистика:\n{score_table}")
-
-# Отримати випадкові питання без повторів
-used_all_once = False
-
-def get_random_questions(n):
-    global used_questions, used_all_once
-    pool = [q for q in questions if q not in used_questions]
-    if len(pool) < n:
-        used_questions.clear()
-        used_all_once = True
-        pool = questions[:]
-    return random.sample(pool, n)
-
-# Обробка повідомлень у приват
+# Обробка приватних повідомлень
 async def handle_private(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not game_running or vote_stage:
-        return
     user = update.message.from_user
     text = update.message.text
-    if user.id not in players:
+    if not text:
         return
-    last_q = current_round_questions[len(current_answers)]
-    if last_q not in current_answers:
-        current_answers[last_q] = []
-    current_answers[last_q].append(text)
-    await update.message.reply_text("✅ Відповідь прийнята!")
 
-# Обробка голосування
-async def vote(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not vote_stage:
-        return
-    query = update.callback_query
-    voter = query.from_user.id
-    data = query.data.split("_")
-    if len(data) < 3:
-        return
-    _, question, index = data
-    try:
-        answer = current_answers[question][int(index)]
-        for pid in players:
-            if pid != voter:
-                scores[pid] += 1
-        await query.answer("🗳 Голос зараховано!")
-        await query.edit_message_reply_markup(None)
-    except:
-        await query.answer("⚠️ Помилка голосування")
+    question = "остання"  # Тут можна зберігати питання → відповідь
+    if question not in answers:
+        answers[question] = []
+    answers[question].append(f"{user.first_name}: {text}")
+    await context.bot.send_message(chat_id=user.id, text="✅ Відповідь збережена!")
 
-# Зупинка гри
-async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global game_running
-    game_running = False
-    await update.message.reply_text("⛔️ Гру зупинено.")
-
-# Старт бота
-if __name__ == '__main__':
+# Запуск бота
+async def main():
     load_questions()
-    app = Application.builder().token(TOKEN).build()
+
+    app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("stopgame", stop))
-    app.add_handler(CallbackQueryHandler(join, pattern="^join$"))
-    app.add_handler(CallbackQueryHandler(vote, pattern="^vote_"))
+    app.add_handler(CallbackQueryHandler(join))
     app.add_handler(MessageHandler(filters.PRIVATE & filters.TEXT, handle_private))
 
-    print("✅ Бот запущено...")
-    app.run_polling()
+    await app.run_polling()
+
+if __name__ == "__main__":
+    asyncio.run(main())
